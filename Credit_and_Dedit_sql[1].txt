@@ -1,0 +1,282 @@
+-- mysql -u root
+CREATE DATABASE IF NOT EXISTS debit_and_credit;
+
+USE debit_and_credit;
+
+
+CREATE TABLE IF NOT EXISTS transactions (
+    customer_id        CHAR(36)       NOT NULL,
+    customer_name      VARCHAR(150)   NOT NULL,
+    account_number     BIGINT         NOT NULL,
+    transaction_date   DATE           NOT NULL,
+    transaction_type   ENUM('Credit', 'Debit') NOT NULL,
+    amount             DECIMAL(15,2)  NOT NULL,
+    balance            DECIMAL(15,2)  NOT NULL,
+    description        VARCHAR(255),
+    branch             VARCHAR(100),
+    transaction_method VARCHAR(50),
+    currency           CHAR(3)        NOT NULL,
+    bank_name          VARCHAR(100),
+    high_risk_flag     varchar(100),
+
+    PRIMARY KEY (customer_id, transaction_date, account_number)
+);
+
+TRUNCATE transactions;
+
+SET GLOBAL local_infile = 1;
+
+
+LOAD DATA INFILE 'C:/ProgramData/MySQL/MySQL Server 8.0/Uploads/dc.csv' INTO TABLE transactions FIELDS TERMINATED BY ',' ENCLOSED BY '"' LINES TERMINATED BY '\n' IGNORE 1 ROWS (customer_id, customer_name, account_number, transaction_date, transaction_type, amount, balance, description, branch, transaction_method, currency, bank_name,high_risk_flag);
+
+
+-- 1. Total Credit Amount
+SELECT
+    SUM(amount) AS total_credit_amount
+FROM transactions
+WHERE transaction_type = 'Credit';
+
+
+-- 2. Total Debit Amount
+SELECT
+    SUM(amount) AS total_debit_amount
+FROM transactions
+WHERE transaction_type = 'Debit';
+
+-- 2a. Total Amount
+SELECT
+    SUM(amount) AS total_amount
+FROM transactions
+
+
+-- 3. Credit to Debit Ratio
+SELECT
+    SUM(CASE WHEN transaction_type = 'Credit' THEN amount ELSE 0 END)
+    /
+    NULLIF(
+        SUM(CASE WHEN transaction_type = 'Debit' THEN amount ELSE 0 END),
+        0
+    ) AS credit_to_debit_ratio
+FROM transactions;
+
+
+-- 4. Net Transaction Amount
+SELECT
+    SUM(CASE
+        WHEN transaction_type = 'Credit' THEN amount
+        WHEN transaction_type = 'Debit' THEN -amount
+        ELSE 0
+    END) AS net_transaction_amount
+FROM transactions;
+
+
+-- 5. Account Activity Ratio
+
+SELECT
+    COUNT(*) AS total_transaction_count,
+
+    SUM(
+        CASE
+            WHEN transaction_type = 'Credit' THEN amount
+            WHEN transaction_type = 'Debit' THEN -amount
+            ELSE 0
+        END
+    ) AS net_transaction_amount,
+
+    ROUND(
+        COUNT(*) /
+        NULLIF(
+            SUM(
+                CASE
+                    WHEN transaction_type = 'Credit' THEN amount
+                    WHEN transaction_type = 'Debit' THEN -amount
+                    ELSE 0
+                END
+            ),
+            0
+        ),
+        6
+    ) AS account_activity_ratio
+
+FROM transactions;
+
+
+-- 6a. Transactions per Day
+SELECT
+    transaction_date,
+    COUNT(*) AS transaction_count
+FROM transactions
+GROUP BY transaction_date
+ORDER BY transaction_date;
+
+
+-- 6b. Transactions per Week
+SELECT
+    YEAR(transaction_date) AS year,
+    WEEK(transaction_date) AS week,
+    COUNT(*) AS transaction_count
+FROM transactions
+GROUP BY
+    YEAR(transaction_date),
+    WEEK(transaction_date)
+ORDER BY
+    year,
+    week;
+
+
+-- 6c. Transactions per Month
+SELECT
+    DATE_FORMAT(transaction_date, '%Y-%m') AS month,
+    COUNT(*) AS transaction_count
+FROM transactions
+GROUP BY DATE_FORMAT(transaction_date, '%Y-%m')
+ORDER BY month;
+
+
+-- 7. Total Transaction Amount by Branch
+SELECT
+    branch,
+    SUM(amount) AS total_transaction_amount
+FROM transactions
+GROUP BY branch
+ORDER BY total_transaction_amount DESC;
+
+
+
+-- 8. Transaction Volume by Bank
+SELECT
+    bank_name,
+    SUM(amount) AS transaction_amount
+FROM transactions
+GROUP BY bank_name
+ORDER BY transaction_amount DESC;
+
+-- 9. Transaction Method Distribution
+
+SELECT
+    transaction_method,
+    COUNT(*) AS transaction_count,
+    ROUND(
+        COUNT(*) * 100.0 / NULLIF(
+            (SELECT COUNT(*) FROM transactions),
+            0
+        ),
+        2
+    ) AS transaction_percentage
+FROM transactions
+GROUP BY transaction_method
+ORDER BY transaction_count DESC;
+
+
+-- 10. Branch Transaction Growth
+-- Formula:
+-- ((Current Period Amount - Previous Period Amount)
+--  / Previous Period Amount) × 100
+
+WITH monthly_branch AS (
+    SELECT
+        branch,
+        DATE_FORMAT(transaction_date, '%Y-%m') AS month,
+        SUM(amount) AS transaction_amount
+    FROM transactions
+    GROUP BY
+        branch,
+        DATE_FORMAT(transaction_date, '%Y-%m')
+),
+
+branch_growth AS (
+    SELECT
+        branch,
+        month,
+        transaction_amount,
+        LAG(transaction_amount) OVER (
+            PARTITION BY branch
+            ORDER BY month
+        ) AS previous_transaction_amount
+    FROM monthly_branch
+)
+
+SELECT
+    branch,
+    month,
+    transaction_amount,
+    previous_transaction_amount,
+
+    ROUND(
+        (
+            (transaction_amount - previous_transaction_amount)
+            / NULLIF(previous_transaction_amount, 0)
+        ) * 100,
+        2
+    ) AS transaction_growth_percentage
+
+FROM branch_growth
+ORDER BY branch, month;
+
+
+
+-- 11/12. High-Risk vs Normal Transactions
+-- High-risk: amount > 4000
+-- Normal: amount <= 4000
+
+SELECT
+    COUNT(*) AS total_transactions,
+
+    SUM(CASE
+        WHEN amount > 4000 THEN 1
+        ELSE 0
+    END) AS high_risk_transactions,
+
+    SUM(CASE
+        WHEN amount <= 4000 THEN 1
+        ELSE 0
+    END) AS normal_transactions,
+
+    ROUND(
+        SUM(CASE WHEN amount > 4000 THEN 1 ELSE 0 END)
+        / COUNT(*) * 100,
+        2
+    ) AS high_risk_percentage,
+
+    ROUND(
+        SUM(CASE WHEN amount <= 4000 THEN 1 ELSE 0 END)
+        / COUNT(*) * 100,
+        2
+    ) AS normal_percentage
+
+FROM transactions;
+
+
+-- 12. Suspicious Transaction Frequency by Month
+-- High-risk transaction: amount > 4000
+
+SELECT
+    DATE_FORMAT(transaction_date, '%Y-%m') AS month,
+
+    COUNT(*) AS total_transactions,
+
+    SUM(CASE
+        WHEN amount > 4000 THEN 1
+        ELSE 0
+    END) AS high_risk_transactions,
+
+    SUM(CASE
+        WHEN amount <= 4000 THEN 1
+        ELSE 0
+    END) AS normal_transactions,
+
+    ROUND(
+        SUM(CASE WHEN amount > 4000 THEN 1 ELSE 0 END)
+        / COUNT(*) * 100,
+        2
+    ) AS high_risk_percentage,
+
+    ROUND(
+        SUM(CASE WHEN amount <= 4000 THEN 1 ELSE 0 END)
+        / COUNT(*) * 100,
+        2
+    ) AS normal_percentage
+
+FROM transactions
+GROUP BY DATE_FORMAT(transaction_date, '%Y-%m')
+ORDER BY month;
